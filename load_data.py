@@ -10,8 +10,9 @@ import numpy as np
 ### PARAMETERS ###
 ##################
 
-N_SAMPLES = 1000 # SET TO -1 TO USE ALL SAMPLES
-PATH = "/home/victor/Data/HRTEM_data/AgCo/avec_substrat/256px/"
+N_SAMPLES = -1 # SET TO -1 TO USE ALL SAMPLES
+N_PX = 256
+PATH = f"/home/victor/Data/HRTEM_data/AgCo/avec_substrat/{N_PX}px/"
 
 
 ###############
@@ -20,10 +21,10 @@ PATH = "/home/victor/Data/HRTEM_data/AgCo/avec_substrat/256px/"
 
 start_time = time.time()
 
-data1 = np.load(PATH + "Dataset1/data.npy", mmap_mode="r")
-data2 = np.load(PATH + "Dataset2/data.npy", mmap_mode="r")
-data3 = np.load(PATH + "Dataset3/data.npy", mmap_mode="r")
-data4 = np.load(PATH + "Dataset4/data.npy", mmap_mode="r")
+data1 = np.load(PATH + "dataset1.npy", mmap_mode="r")
+data2 = np.load(PATH + "dataset2.npy", mmap_mode="r")
+data3 = np.load(PATH + "dataset3.npy", mmap_mode="r")
+data4 = np.load(PATH + "dataset4.npy", mmap_mode="r")
 data = np.concatenate((data1, data2, data3, data4), axis=0)
 random_state = np.random.RandomState(seed=42)
 random_state.shuffle(data)

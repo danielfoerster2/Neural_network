@@ -1,2 +1,3 @@
 *.log
-/Figure
+*.npy
+*.pkl

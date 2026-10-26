@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-with open("predictions.pkl", "rb") as f:
+with open("predictions_jz_50000.pkl", "rb") as f:
     data = pickle.load(f)
     
 for param in data.keys():

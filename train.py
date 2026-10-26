@@ -99,28 +99,24 @@ def main():
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0)
 
     model.compile(optimizer=optimizer, loss='mse')
-    history = model.fit(training_gen, validation_data=validation_gen, epochs=EPOCHS, callbacks=callbacks)
-    predictions = model.predict(test_gen)
+    history = model.fit(training_gen, validation_data=validation_gen, epochs=EPOCHS, callbacks=callbacks, verbose=2)
+    predictions = model.predict(test_gen, verbose=0)
     
     data = {}    
     for i, param in enumerate(PARAMETERS):
         data[param] = {
             "y_true" : test_set[param],
             "y_pred" : predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
-            #"y_min" : y_min[i],
-            #"y_max" : y_max[i]
         }
     
     data["performance"] = {
         "loss": history.history['loss'],
         "val_loss": history.history['val_loss'],
-        #"train_mse": model.evaluate(training_gen),
-        "train_mse": model.evaluate(train_eval_gen),
-        "val_mse": model.evaluate(validation_gen),
-        "test_mse": model.evaluate(test_gen)
+        "train_mse": model.evaluate(train_eval_gen, verbose=0),
+        "val_mse": model.evaluate(validation_gen, verbose=0),
+        "test_mse": model.evaluate(test_gen, verbose=0)
     }
     
-    #with open(os.path.join(SAVE_PATH, "predictions.pkl"), "wb") as f:
     with open(os.path.join("predictions.pkl"), "wb") as f:
         pickle.dump(data, f)
     
