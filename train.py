@@ -54,6 +54,12 @@ class Batches(tf.keras.utils.PyDataset):
             np.random.shuffle(self.idx)
 
 
+def conv_bn_relu(filters):
+    return [tf.keras.layers.Conv2D(filters, kernel_size=3, padding='same', use_bias=False),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU()]
+
+
 def main():
     start_time = time.time()
     
@@ -70,9 +76,10 @@ def main():
     train_idx, val_idx, test_idx = (np.flatnonzero(np.isin(groups, g)) for g in (train_groups, val_groups, test_groups))
 
     y = np.column_stack([data_hrtem[p] for p in PARAMETERS]).astype(np.float32)
-    y_min = np.min(y[train_idx], axis=0)
-    y_max = np.max(y[train_idx], axis=0)
-    y_norm = (y - y_min) / (y_max - y_min)
+    y_fit = np.column_stack([np.cbrt(y[:, i]) if p == "n_atoms" else y[:, i] for i, p in enumerate(PARAMETERS)]) # N^(1/3) scales like the particle size in the image
+    y_min = np.min(y_fit[train_idx], axis=0)
+    y_max = np.max(y_fit[train_idx], axis=0)
+    y_norm = (y_fit - y_min) / (y_max - y_min)
 
     images = data_hrtem["image"] # still memory-mapped, uint8
     training_gen = Batches(images, y_norm, train_idx, shuffle=True)
@@ -80,27 +87,16 @@ def main():
     validation_gen = Batches(images, y_norm, val_idx, shuffle=False)
     test_gen = Batches(images, y_norm, test_idx, shuffle=False)
 
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(N_PX, N_PX, 1), dtype="uint8"),
-        tf.keras.layers.Rescaling(1./255),
-        tf.keras.layers.RandomFlip("horizontal_and_vertical"), # active during training only
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),        
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(1024, activation='relu'),
-        tf.keras.layers.Dense(768, activation='relu'),
-        tf.keras.layers.Dense(len(PARAMETERS), activation='linear', dtype="float32")
-    ])
+    # Filters double as the resolution halves; 5 blocks see 156 px (6.1 nm), more than the largest particles
+    layers = [tf.keras.layers.Input(shape=(N_PX, N_PX, 1), dtype="uint8"),
+              tf.keras.layers.Rescaling(1./255),
+              tf.keras.layers.RandomFlip("horizontal_and_vertical")] # active during training only
+    for filters in (32, 64, 128, 256, 256):
+        layers += conv_bn_relu(filters) + conv_bn_relu(filters) + [tf.keras.layers.MaxPooling2D(pool_size=2)]
+    layers += [tf.keras.layers.GlobalAveragePooling2D(), # same features wherever the particle lies in the image
+               tf.keras.layers.Dense(256, activation='relu'),
+               tf.keras.layers.Dense(len(PARAMETERS), activation='linear', dtype="float32")]
+    model = tf.keras.Sequential(layers)
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=PATIENCE, min_delta=1e-4, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=PATIENCE//3, min_delta=1e-6)
@@ -113,9 +109,10 @@ def main():
     
     data = {}    
     for i, param in enumerate(PARAMETERS):
+        y_pred = predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
         data[param] = {
             "y_true" : y[test_idx, i],
-            "y_pred" : predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
+            "y_pred" : y_pred ** 3 if param == "n_atoms" else y_pred
         }
     
     data["performance"] = {
