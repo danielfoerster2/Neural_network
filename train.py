@@ -54,6 +54,15 @@ class Batches(tf.keras.utils.PyDataset):
             np.random.shuffle(self.idx)
 
 
+class RandomTranspose(tf.keras.layers.Layer):
+    # Swaps x and y in half of the images, during training only; with RandomFlip this gives the 8 symmetries of the square
+    def call(self, x, training=None):
+        if not training:
+            return x
+        swap = tf.random.uniform([tf.shape(x)[0], 1, 1, 1]) < 0.5
+        return tf.where(swap, tf.transpose(x, [0, 2, 1, 3]), x)
+
+
 def conv_bn_relu(filters):
     return [tf.keras.layers.Conv2D(filters, kernel_size=3, padding='same', use_bias=False),
             tf.keras.layers.BatchNormalization(),
@@ -90,7 +99,8 @@ def main():
     # Filters double as the resolution halves; 5 blocks see 156 px (6.1 nm), more than the largest particles
     layers = [tf.keras.layers.Input(shape=(N_PX, N_PX, 1), dtype="uint8"),
               tf.keras.layers.Rescaling(1./255),
-              tf.keras.layers.RandomFlip("horizontal_and_vertical")] # active during training only
+              tf.keras.layers.RandomFlip("horizontal_and_vertical"), # active during training only
+              RandomTranspose()]
     for filters in (32, 64, 128, 256, 256):
         layers += conv_bn_relu(filters) + conv_bn_relu(filters) + [tf.keras.layers.MaxPooling2D(pool_size=2)]
     layers += [tf.keras.layers.GlobalAveragePooling2D(), # same features wherever the particle lies in the image
