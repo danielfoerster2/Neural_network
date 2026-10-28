@@ -23,14 +23,51 @@ TEST_SIZE = 0.1
 EPOCHS = 50
 PATIENCE = 10
 N_PX = 256
+BATCH_SIZE = 128
 PARAMETERS = ["n_atoms", "composition", "coreshell_index"]
 SAVE_PATH = "/home/victor/Data/Predictions_data/avec_substrat/"
+
+tf.keras.mixed_precision.set_global_policy("mixed_float16") # float16 on the V100 tensor cores, weights kept in float32
 
 
 
 ###############
 ### PROGRAM ###
 ###############
+
+class Batches(tf.keras.utils.PyDataset):
+    # Reads one batch at a time from the memory-mapped file; images stay uint8 until the Rescaling layer, on the GPU
+    def __init__(self, images, y, idx, shuffle):
+        super().__init__(workers=4)
+        self.images, self.y, self.idx, self.shuffle = images, y, idx.copy(), shuffle
+        self.on_epoch_end()
+
+    def __len__(self):
+        return int(np.ceil(len(self.idx) / BATCH_SIZE))
+
+    def __getitem__(self, i):
+        idx = np.sort(self.idx[i * BATCH_SIZE:(i + 1) * BATCH_SIZE])
+        return self.images[idx][..., np.newaxis], self.y[idx]
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.idx)
+
+
+class RandomTranspose(tf.keras.layers.Layer):
+    # Swaps x and y in half of the images, during training only; with RandomFlip this gives the 8 symmetries of the square
+    def call(self, x, training=None):
+        if not training:
+            return x
+        swap = tf.random.uniform([tf.shape(x)[0], 1, 1, 1]) < 0.5
+        return tf.where(swap, tf.transpose(x, [0, 2, 1, 3]), x)
+
+
+def conv_bn_relu(filters):
+    return [tf.keras.layers.Conv2D(filters, kernel_size=3, padding='same', use_bias=False),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU()]
+
 
 def main():
     start_time = time.time()
@@ -41,57 +78,35 @@ def main():
         if param not in data_hrtem.dtype.names:
             sys.exit(f"Error: Parameter '{param}' not found in the dataset.\nAvailable parameters are: {data_hrtem.dtype.names}")
             
-    training_set, test_set = train_test_split(data_hrtem, train_size=TRAINING_SIZE, random_state=42)
-    validation_set, test_set = train_test_split(test_set, train_size=round(VALIDATION_SIZE / (VALIDATION_SIZE + TEST_SIZE), 2), random_state=42)
+    # The 10 images of one MD snapshot (id_sim = 10 * snapshot + rotation) go to the same set
+    groups = data_hrtem["id_sim"] // 10
+    train_groups, test_groups = train_test_split(np.unique(groups), train_size=TRAINING_SIZE, random_state=42)
+    val_groups, test_groups = train_test_split(test_groups, train_size=round(VALIDATION_SIZE / (VALIDATION_SIZE + TEST_SIZE), 2), random_state=42)
+    train_idx, val_idx, test_idx = (np.flatnonzero(np.isin(groups, g)) for g in (train_groups, val_groups, test_groups))
 
-    X_train = np.stack(training_set["image"]).astype(np.float32)
-    X_train = X_train[..., np.newaxis]
-    y_train = np.column_stack([training_set[p] for p in PARAMETERS]).astype(np.float32)
+    y = np.column_stack([data_hrtem[p] for p in PARAMETERS]).astype(np.float32)
+    y_fit = np.column_stack([np.cbrt(y[:, i]) if p == "n_atoms" else y[:, i] for i, p in enumerate(PARAMETERS)]) # N^(1/3) scales like the particle size in the image
+    y_min = np.min(y_fit[train_idx], axis=0)
+    y_max = np.max(y_fit[train_idx], axis=0)
+    y_norm = (y_fit - y_min) / (y_max - y_min)
 
-    X_val = np.stack(validation_set["image"]).astype(np.float32)
-    X_val = X_val[..., np.newaxis]
-    y_val = np.column_stack([validation_set[p] for p in PARAMETERS]).astype(np.float32)
-        
-    X_test = np.stack(test_set["image"]).astype(np.float32)
-    X_test = X_test[..., np.newaxis]
-    y_test = np.column_stack([test_set[p] for p in PARAMETERS]).astype(np.float32)
+    images = data_hrtem["image"] # still memory-mapped, uint8
+    training_gen = Batches(images, y_norm, train_idx, shuffle=True)
+    train_eval_gen = Batches(images, y_norm, train_idx, shuffle=False)
+    validation_gen = Batches(images, y_norm, val_idx, shuffle=False)
+    test_gen = Batches(images, y_norm, test_idx, shuffle=False)
 
-    y_min = np.min(y_train, axis=0)
-    y_max = np.max(y_train, axis=0)
-
-    y_train = (y_train - y_min) / (y_max - y_min)
-    y_val = (y_val - y_min) / (y_max - y_min)
-    y_test = (y_test - y_min) / (y_max - y_min)    
-
-    datagen_training = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1./255, horizontal_flip=True, vertical_flip=True)
-    datagen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1./255)
-    
-    
-    training_gen = datagen_training.flow(X_train, y_train, batch_size=128, shuffle=True)
-    train_eval_gen = datagen.flow(X_train, y_train, batch_size=128, shuffle=False)
-    #validation_gen = datagen.flow(X_val, y_val, batch_size=128, shuffle=True)
-    validation_gen = datagen.flow(X_val, y_val, batch_size=128, shuffle=False)
-    test_gen = datagen.flow(X_test, y_test, batch_size=128, shuffle=False)
-
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(N_PX, N_PX, 1)),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.Conv2D(32, kernel_size=3, padding='same', activation='relu'),
-        tf.keras.layers.MaxPooling2D(pool_size=2),        
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(1024, activation='relu'),
-        tf.keras.layers.Dense(768, activation='relu'),
-        tf.keras.layers.Dense(len(PARAMETERS), activation='linear')
-    ])
+    # Filters double as the resolution halves; 5 blocks see 156 px (6.1 nm), more than the largest particles
+    layers = [tf.keras.layers.Input(shape=(N_PX, N_PX, 1), dtype="uint8"),
+              tf.keras.layers.Rescaling(1./255),
+              tf.keras.layers.RandomFlip("horizontal_and_vertical"), # active during training only
+              RandomTranspose()]
+    for filters in (32, 64, 128, 256, 256):
+        layers += conv_bn_relu(filters) + conv_bn_relu(filters) + [tf.keras.layers.MaxPooling2D(pool_size=2)]
+    layers += [tf.keras.layers.GlobalAveragePooling2D(), # same features wherever the particle lies in the image
+               tf.keras.layers.Dense(256, activation='relu'),
+               tf.keras.layers.Dense(len(PARAMETERS), activation='linear', dtype="float32")]
+    model = tf.keras.Sequential(layers)
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=PATIENCE, min_delta=1e-4, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=PATIENCE//3, min_delta=1e-6)
@@ -104,9 +119,10 @@ def main():
     
     data = {}    
     for i, param in enumerate(PARAMETERS):
+        y_pred = predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
         data[param] = {
-            "y_true" : test_set[param],
-            "y_pred" : predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
+            "y_true" : y[test_idx, i],
+            "y_pred" : y_pred ** 3 if param == "n_atoms" else y_pred
         }
     
     data["performance"] = {
