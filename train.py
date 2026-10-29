@@ -54,6 +54,7 @@ class Batches(tf.keras.utils.PyDataset):
             np.random.shuffle(self.idx)
 
 
+@tf.keras.utils.register_keras_serializable(package="Neural_network")
 class RandomTranspose(tf.keras.layers.Layer):
     # Swaps x and y in half of the images, during training only; with RandomFlip this gives the 8 symmetries of the square
     def call(self, x, training=None):
@@ -61,6 +62,21 @@ class RandomTranspose(tf.keras.layers.Layer):
             return x
         swap = tf.random.uniform([tf.shape(x)[0], 1, 1, 1]) < 0.5
         return tf.where(swap, tf.transpose(x, [0, 2, 1, 3]), x)
+
+
+@tf.keras.utils.register_keras_serializable(package="Neural_network")
+class Denormalize(tf.keras.layers.Layer):
+    # Min-max normalised outputs back to physical units; the parameters flagged in cube were fitted as their cube root
+    def __init__(self, y_min, y_max, cube, **kwargs):
+        super().__init__(**kwargs)
+        self.y_min, self.y_max, self.cube = [float(v) for v in y_min], [float(v) for v in y_max], [bool(c) for c in cube]
+
+    def call(self, y):
+        y = y * (tf.constant(self.y_max) - tf.constant(self.y_min)) + tf.constant(self.y_min)
+        return tf.where(tf.constant(self.cube), y ** 3, y)
+
+    def get_config(self):
+        return {**super().get_config(), "y_min": self.y_min, "y_max": self.y_max, "cube": self.cube}
 
 
 def conv_bn_relu(filters):
@@ -114,20 +130,24 @@ def main():
     model = tf.keras.Sequential(layers)
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=PATIENCE, min_delta=1e-4, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=PATIENCE//3, min_delta=1e-6)
+        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=PATIENCE//3, min_delta=1e-6),
+        tf.keras.callbacks.ModelCheckpoint("checkpoint.keras", monitor='val_loss', save_best_only=True) # best epoch so far (normalised outputs), in case the job hits its time limit
     ]
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0)
 
     model.compile(optimizer=optimizer, loss='mse')
     history = model.fit(training_gen, validation_data=validation_gen, epochs=EPOCHS, callbacks=callbacks, verbose=2)
-    predictions = model.predict(test_gen, verbose=0)
-    
-    data = {}    
+    # Weights of the best epoch (restore_best_weights). Input: uint8 images (n, N_PX, N_PX, 1); output: PARAMETERS in physical units.
+    # To load it elsewhere: import train (registers the custom layers), then tf.keras.models.load_model("model.keras")
+    predictor = tf.keras.Model(model.inputs, Denormalize(y_min, y_max, [p == "n_atoms" for p in PARAMETERS], dtype="float32")(model.outputs[0]))
+    predictor.save("model.keras")
+    predictions = predictor.predict(test_gen, verbose=0)
+
+    data = {}
     for i, param in enumerate(PARAMETERS):
-        y_pred = predictions[:, i] * (y_max[i] - y_min[i]) + y_min[i]
         data[param] = {
             "y_true" : y[test_idx, i],
-            "y_pred" : y_pred ** 3 if param == "n_atoms" else y_pred
+            "y_pred" : predictions[:, i]
         }
     
     data["performance"] = {
