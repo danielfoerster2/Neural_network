@@ -2,3 +2,5 @@
 *.npy
 *.pkl
 *.keras
+backup/
+history.csv

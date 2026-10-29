@@ -128,16 +128,27 @@ def main():
                tf.keras.layers.Dense(256, activation='relu'),
                tf.keras.layers.Dense(len(PARAMETERS), activation='linear', dtype="float32")]
     model = tf.keras.Sequential(layers)
+    # A job stopped before the end (time limit) leaves backup/: submitting it again resumes after the last completed epoch
+    resume = os.path.isdir("backup")
+    best_val_loss, initial_epoch = None, 0
+    if resume and os.path.exists("history.csv"):
+        previous = np.atleast_1d(np.genfromtxt("history.csv", delimiter=",", names=True))
+        best_val_loss, initial_epoch = float(np.min(previous["val_loss"])), len(previous) # Keras 3.0 does not restore the epoch counter itself
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=PATIENCE, min_delta=1e-4, restore_best_weights=True),
+        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=PATIENCE, min_delta=1e-4),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=PATIENCE//3, min_delta=1e-6),
-        tf.keras.callbacks.ModelCheckpoint("checkpoint.keras", monitor='val_loss', save_best_only=True) # best epoch so far (normalised outputs), in case the job hits its time limit
+        tf.keras.callbacks.ModelCheckpoint("checkpoint.keras", monitor='val_loss', save_best_only=True, initial_value_threshold=best_val_loss), # best epoch over all jobs (normalised outputs)
+        tf.keras.callbacks.CSVLogger("history.csv", append=resume), # losses of every epoch, over all jobs
+        tf.keras.callbacks.BackupAndRestore("backup") # last, so that a backup marks a fully completed epoch; deleted when training ends
     ]
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0)
 
     model.compile(optimizer=optimizer, loss='mse')
-    history = model.fit(training_gen, validation_data=validation_gen, epochs=EPOCHS, callbacks=callbacks, verbose=2)
-    # Weights of the best epoch (restore_best_weights). Input: uint8 images (n, N_PX, N_PX, 1); output: PARAMETERS in physical units.
+    model.optimizer.build(model.trainable_variables) # built before BackupAndRestore reloads the backup, so the optimizer state is reloaded too (Keras 3.0 builds it later)
+    model.fit(training_gen, validation_data=validation_gen, epochs=EPOCHS, initial_epoch=initial_epoch, callbacks=callbacks, verbose=2)
+    model.load_weights("checkpoint.keras") # best epoch over all jobs (EarlyStopping only sees the epochs of this job)
+    history = np.atleast_1d(np.genfromtxt("history.csv", delimiter=",", names=True))
+    # Weights of the best epoch. Input: uint8 images (n, N_PX, N_PX, 1); output: PARAMETERS in physical units.
     # To load it elsewhere: import train (registers the custom layers), then tf.keras.models.load_model("model.keras")
     predictor = tf.keras.Model(model.inputs, Denormalize(y_min, y_max, [p == "n_atoms" for p in PARAMETERS], dtype="float32")(model.outputs[0]))
     predictor.save("model.keras")
@@ -151,8 +162,8 @@ def main():
         }
     
     data["performance"] = {
-        "loss": history.history['loss'],
-        "val_loss": history.history['val_loss'],
+        "loss": history['loss'],
+        "val_loss": history['val_loss'],
         "train_mse": model.evaluate(train_eval_gen, verbose=0),
         "val_mse": model.evaluate(validation_gen, verbose=0),
         "test_mse": model.evaluate(test_gen, verbose=0)
