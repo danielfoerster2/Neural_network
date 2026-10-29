@@ -4,6 +4,7 @@ import sys
 import time
 
 import numpy as np
+from numpy.lib import recfunctions as rfn
 
 
 ##################
@@ -33,5 +34,6 @@ if N_SAMPLES >= 0 and N_SAMPLES < len(data):
 elif N_SAMPLES >= len(data):
     sys.exit(f"N_SAMPLES ({N_SAMPLES}) is greater than the number of samples in the dataset ({len(data)})")
 np.save("all_data.npy", data)
+np.save("meta.npy", rfn.repack_fields(data[[name for name in data.dtype.names if name != "image"]])) # descriptors only, same order: train.py reads them without touching the images
 
 print("Time to load data: ", time.time() - start_time)

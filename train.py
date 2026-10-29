@@ -73,18 +73,21 @@ def main():
     start_time = time.time()
     
     data_hrtem = np.load("all_data.npy", mmap_mode="r")
-    
+    meta = np.load("meta.npy")
+    if len(meta) != len(data_hrtem):
+        sys.exit(f"Error: meta.npy ({len(meta)} records) and all_data.npy ({len(data_hrtem)}) do not match; run load_data.py again")
+
     for param in PARAMETERS:
-        if param not in data_hrtem.dtype.names:
-            sys.exit(f"Error: Parameter '{param}' not found in the dataset.\nAvailable parameters are: {data_hrtem.dtype.names}")
+        if param not in meta.dtype.names:
+            sys.exit(f"Error: Parameter '{param}' not found in the dataset.\nAvailable parameters are: {meta.dtype.names}")
             
     # The 10 images of one MD snapshot (id_sim = 10 * snapshot + rotation) go to the same set
-    groups = data_hrtem["id_sim"] // 10
+    groups = meta["id_sim"] // 10
     train_groups, test_groups = train_test_split(np.unique(groups), train_size=TRAINING_SIZE, random_state=42)
     val_groups, test_groups = train_test_split(test_groups, train_size=round(VALIDATION_SIZE / (VALIDATION_SIZE + TEST_SIZE), 2), random_state=42)
     train_idx, val_idx, test_idx = (np.flatnonzero(np.isin(groups, g)) for g in (train_groups, val_groups, test_groups))
 
-    y = np.column_stack([data_hrtem[p] for p in PARAMETERS]).astype(np.float32)
+    y = np.column_stack([meta[p] for p in PARAMETERS]).astype(np.float32)
     y_fit = np.column_stack([np.cbrt(y[:, i]) if p == "n_atoms" else y[:, i] for i, p in enumerate(PARAMETERS)]) # N^(1/3) scales like the particle size in the image
     y_min = np.min(y_fit[train_idx], axis=0)
     y_max = np.max(y_fit[train_idx], axis=0)
@@ -95,6 +98,8 @@ def main():
     train_eval_gen = Batches(images, y_norm, train_idx, shuffle=False)
     validation_gen = Batches(images, y_norm, val_idx, shuffle=False)
     test_gen = Batches(images, y_norm, test_idx, shuffle=False)
+
+    print(f"Time to prepare data: {time.time() - start_time:.2f} seconds")
 
     # Filters double as the resolution halves; 5 blocks see 156 px (6.1 nm), more than the largest particles
     layers = [tf.keras.layers.Input(shape=(N_PX, N_PX, 1), dtype="uint8"),
