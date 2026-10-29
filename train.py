@@ -17,10 +17,10 @@ from sklearn.model_selection import train_test_split
 ### PARAMETERS ###
 ##################
 
-TRAINING_SIZE = 0.6
-VALIDATION_SIZE = 0.3
+TRAINING_SIZE = 0.8
+VALIDATION_SIZE = 0.1
 TEST_SIZE = 0.1
-EPOCHS = 50
+EPOCHS = 30
 PATIENCE = 10
 N_PX = 256
 BATCH_SIZE = 128
