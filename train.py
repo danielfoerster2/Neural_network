@@ -141,7 +141,7 @@ def main():
         tf.keras.callbacks.CSVLogger("history.csv", append=resume), # losses of every epoch, over all jobs
         tf.keras.callbacks.BackupAndRestore("backup") # last, so that a backup marks a fully completed epoch; deleted when training ends
     ]
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0)
+    optimizer = tf.keras.optimizers.AdamW() # Keras defaults: learning rate 1e-3, weight decay 0.004, no gradient clipping
 
     model.compile(optimizer=optimizer, loss='mse')
     model.optimizer.build(model.trainable_variables) # built before BackupAndRestore reloads the backup, so the optimizer state is reloaded too (Keras 3.0 builds it later)
