@@ -4,3 +4,4 @@
 *.keras
 backup/
 history.csv
+__pycache__/
