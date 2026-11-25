@@ -3,6 +3,7 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+import math
 import pickle
 import time
 import sys
@@ -13,6 +14,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 from train import RandomTranspose, Denormalize # registered once, so that "import train" is enough to load the model.keras of either script
+from muon import Muon
 
 
 ##################
@@ -33,7 +35,10 @@ PRETRAINED = False
 # Downsampling before the residual stages: 4 in the original ResNet50 (stride 2 convolution, then max pooling),
 # 2 without the max pooling, which is the step that discards information; 1 without either
 STEM_DOWNSAMPLING = 2
-OUTPUT_DIR = "resnet50" # checkpoint, history, backup and results, apart from those of train.py
+# "adamw": Keras defaults. "muon": Muon update (muon.py) for the hidden convolutions and the Dense(256), AdamW for the
+# first convolution, the output layer, biases and batch normalisation; same learning rate and weight decay
+OPTIMIZER = "muon"
+OUTPUT_DIR = "resnet50" if OPTIMIZER == "adamw" else "resnet50_muon" # checkpoint, history, backup and results, apart from those of train.py and of the other optimizer
 
 tf.keras.mixed_precision.set_global_policy("mixed_float16") # float16 on the V100 tensor cores, weights kept in float32
 
@@ -146,7 +151,13 @@ def main():
         tf.keras.callbacks.BackupAndRestore(output("backup")) # last, so that a backup marks a fully completed epoch; deleted when training ends
     ]
     # Keras defaults (weight decay 0.004, no gradient clipping); smaller steps when fine-tuning, so as not to wipe out the ImageNet features
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=1e-4 if PRETRAINED else 1e-3)
+    learning_rate = 1e-4 if PRETRAINED else 1e-3
+    if OPTIMIZER == "muon":
+        optimizer = Muon(learning_rate=learning_rate, exclude_layers=["conv1_conv", model.layers[-1].name]) # stem convolution and output layer on AdamW
+        n_muon = sum(math.prod(v.shape) for v in model.trainable_variables if optimizer.uses_muon(v))
+        print(f"Muon update for {n_muon} of {sum(math.prod(v.shape) for v in model.trainable_variables)} trainable weights, AdamW for the others")
+    else:
+        optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate)
 
     model.compile(optimizer=optimizer, loss='mse')
     model.optimizer.build(model.trainable_variables) # built before BackupAndRestore reloads the backup, so the optimizer state is reloaded too (Keras 3.0 builds it later)
